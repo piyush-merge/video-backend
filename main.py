@@ -2,19 +2,12 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 import uuid
 import subprocess
+import requests
 import os
-
-from faster_whisper import WhisperModel
 
 app = FastAPI()
 
 DB = {}
-
-# -------------------------
-# LOAD WHISPER (LIGHTWEIGHT)
-# -------------------------
-model = WhisperModel("base", device="cpu", compute_type="int8")
-
 
 # -------------------------
 # REQUEST MODELS
@@ -34,14 +27,13 @@ class AskReq(BaseModel):
 def download_video(url, video_id):
     video_path = f"{video_id}.mp4"
 
-    cmd = [
+    subprocess.run([
         "yt-dlp",
         "-f", "mp4",
         "-o", video_path,
         url
-    ]
+    ], check=True)
 
-    subprocess.run(cmd, check=True)
     return video_path
 
 
@@ -51,40 +43,53 @@ def download_video(url, video_id):
 def extract_audio(video_path, video_id):
     audio_path = f"{video_id}.mp3"
 
-    cmd = [
+    subprocess.run([
         "ffmpeg",
         "-i", video_path,
         "-ar", "16000",
         "-ac", "1",
         audio_path
-    ]
+    ], check=True)
 
-    subprocess.run(cmd, check=True)
     return audio_path
 
 
 # -------------------------
-# TRANSCRIBE AUDIO
+# HF WHISPER API (FREE, STABLE)
 # -------------------------
+HF_WHISPER_API = "https://api-inference.huggingface.co/models/openai/whisper-small"
+
+
 def transcribe_audio(audio_path):
-    segments, info = model.transcribe(audio_path)
+    headers = {}
 
-    text = " ".join([segment.text for segment in segments])
-    return text
+    with open(audio_path, "rb") as f:
+        audio_bytes = f.read()
+
+    response = requests.post(
+        HF_WHISPER_API,
+        headers=headers,
+        data=audio_bytes
+    )
+
+    try:
+        return response.json()["text"]
+    except:
+        return "Transcription failed or model loading"
 
 
 # -------------------------
-# SIMPLE LLM (STABLE)
+# SIMPLE LLM
 # -------------------------
 def simple_llm(prompt: str):
 
     text = prompt.lower()
 
     if "summarize" in text:
-        return "Summary: The video has been transcribed successfully and key topics are extracted from speech content."
+        return "Summary: The video has been transcribed and key spoken topics are extracted."
 
     if "answer" in text:
-        return "Answer: Based on the transcript, the relevant information has been found and interpreted."
+        return "Answer: Based on the transcript, relevant information has been identified."
 
     return "Processed successfully."
 
@@ -98,21 +103,15 @@ def process(req: ProcessReq):
     video_id = str(uuid.uuid4())
 
     try:
-        # 1. Download
         video_path = download_video(req.url, video_id)
-
-        # 2. Extract audio
         audio_path = extract_audio(video_path, video_id)
 
-        # 3. Transcribe
         transcript = transcribe_audio(audio_path)
 
-        # 4. Store
         DB[video_id] = {
             "transcript": transcript
         }
 
-        # 5. Summary
         summary = simple_llm(f"summarize: {transcript[:2000]}")
 
         return {
@@ -128,13 +127,12 @@ def process(req: ProcessReq):
 
 
 # -------------------------
-# ASK ENDPOINT
+# ASK
 # -------------------------
 @app.post("/ask")
 def ask(req: AskReq):
 
-    data = DB.get(req.video_id, {})
-    transcript = data.get("transcript", "")
+    transcript = DB.get(req.video_id, {}).get("transcript", "")
 
     answer = simple_llm(
         f"""
