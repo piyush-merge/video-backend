@@ -1,15 +1,16 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
 import uuid
+import subprocess
+import os
 
 app = FastAPI()
 
-# In-memory storage (temporary but stable for Render free tier)
 DB = {}
 
 
 # -------------------------
-# REQUEST MODELS
+# REQUESTS
 # -------------------------
 class ProcessReq(BaseModel):
     url: str
@@ -21,24 +22,31 @@ class AskReq(BaseModel):
 
 
 # -------------------------
-# SIMPLE STABLE LLM (NO EXTERNAL DEPENDENCY)
+# DOWNLOAD VIDEO (REAL)
 # -------------------------
-def simple_llm(prompt: str) -> str:
-    text = prompt.lower()
+def download_video(url, video_id):
+    output = f"{video_id}.mp4"
 
-    # SUMMARIZATION LOGIC
-    if "summarize" in text:
-        return (
-            "Summary: This video content has been processed from the provided URL. "
-            "Key points include extracted context, general discussion flow, and inferred topics."
-        )
+    cmd = [
+        "yt-dlp",
+        "-f", "mp4",
+        "-o", output,
+        url
+    ]
 
-    # QUESTION ANSWERING LOGIC
-    if "answer" in text:
-        return (
-            "Answer: Based on the available transcript context, the relevant information "
-            "has been analyzed and matched to your question."
-        )
+    subprocess.run(cmd, check=True)
+    return output
+
+
+# -------------------------
+# PLACEHOLDER LLM (STABLE)
+# -------------------------
+def simple_llm(prompt: str):
+    if "summarize" in prompt.lower():
+        return "Summary: Video downloaded and processed successfully. Content is ready for transcription phase."
+
+    if "answer" in prompt.lower():
+        return "Answer: Based on current processed video context, relevant information is extracted."
 
     return "Processed successfully."
 
@@ -51,21 +59,26 @@ def process(req: ProcessReq):
 
     video_id = str(uuid.uuid4())
 
-    # NOTE:
-    # No yt-dlp, no whisper → avoids Render crashes
-    transcript = f"Simulated transcript extracted from: {req.url}"
+    try:
+        file_path = download_video(req.url, video_id)
 
-    summary = simple_llm(f"summarize this video: {req.url}")
+        DB[video_id] = {
+            "file_path": file_path,
+            "transcript": "Pending transcription phase (Phase 2 upgrade)"
+        }
 
-    DB[video_id] = {
-        "transcript": transcript
-    }
+        summary = simple_llm(f"summarize video {req.url}")
 
-    return {
-        "video_id": video_id,
-        "transcript": transcript,
-        "summary": summary
-    }
+        return {
+            "video_id": video_id,
+            "summary": summary,
+            "transcript": "Download successful. Transcription not yet enabled."
+        }
+
+    except Exception as e:
+        return {
+            "error": str(e)
+        }
 
 
 # -------------------------
@@ -75,20 +88,15 @@ def process(req: ProcessReq):
 def ask(req: AskReq):
 
     data = DB.get(req.video_id, {})
-    transcript = data.get("transcript", "")
 
     answer = simple_llm(
         f"""
-Transcript:
-{transcript}
+Video context:
+{data.get('transcript', '')}
 
 Question:
 {req.question}
-
-Answer based on transcript.
 """
     )
 
-    return {
-        "answer": answer
-    }
+    return {"answer": answer}
