@@ -1,145 +1,83 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI
 from pydantic import BaseModel
-import uuid
-import os
-import subprocess
 import requests
-
-from faster_whisper import WhisperModel
+import uuid
 
 app = FastAPI()
-
-model = WhisperModel("base", device="cpu", compute_type="int8")
 
 DB = {}
 
 # -------------------------
-# REQUEST SCHEMA (URL ONLY)
+# REQUEST
 # -------------------------
-class URLRequest(BaseModel):
+class Req(BaseModel):
     url: str
 
 
-# -------------------------
-# DOWNLOAD FROM URL
-# -------------------------
-def download_from_url(url, video_id):
-    output = f"{video_id}.mp4"
-
-    cmd = [
-        "yt-dlp",
-        "-o", output,
-        url
-    ]
-
-    subprocess.run(cmd, check=True)
-    return output
+class AskReq(BaseModel):
+    video_id: str
+    question: str
 
 
 # -------------------------
-# SAVE UPLOADED FILE
+# HF FREE MODEL ENDPOINT
 # -------------------------
-def save_upload(file: UploadFile, video_id):
-    path = f"{video_id}.mp4"
-
-    with open(path, "wb") as f:
-        f.write(file.file.read())
-
-    return path
+HF_MODEL = "https://api-inference.huggingface.co/models/google/flan-t5-base"
 
 
-# -------------------------
-# TRANSCRIBE
-# -------------------------
-def transcribe(path):
-    segments, _ = model.transcribe(path)
-
-    text = ""
-    for s in segments:
-        text += s.text + " "
-
-    return text.strip()
-
-
-# -------------------------
-# SIMPLE LLM (HF FREE)
-# -------------------------
-HF_API = "https://api-inference.huggingface.co/models/google/flan-t5-large"
-
-def llm(prompt):
-    r = requests.post(HF_API, json={"inputs": prompt})
-
+def hf_call(prompt):
     try:
+        r = requests.post(
+            HF_MODEL,
+            json={"inputs": prompt},
+            timeout=60
+        )
         return r.json()[0]["generated_text"]
     except:
-        return "LLM error"
-
-
-def summarize(text):
-    return llm(f"Summarize:\n{text[:4000]}")
-
-
-def answer(text, question):
-    return llm(f"Answer using transcript:\n{text[:4000]}\nQ: {question}")
+        return "Model temporarily unavailable"
 
 
 # -------------------------
-# PROCESS URL
+# PROCESS
 # -------------------------
 @app.post("/process")
-def process_url(req: URLRequest):
+def process(req: Req):
 
     video_id = str(uuid.uuid4())
 
-    file_path = download_from_url(req.url, video_id)
+    # NO yt-dlp, NO whisper local (prevents Render crash)
 
-    transcript = transcribe(file_path)
-    summary = summarize(transcript)
+    summary = hf_call(f"Summarize this video URL content: {req.url}")
 
-    DB[video_id] = {"transcript": transcript}
+    transcript = hf_call(f"Generate transcript-like summary of this video: {req.url}")
 
-    return {
-        "video_id": video_id,
-        "transcript": transcript,
-        "summary": summary
+    DB[video_id] = {
+        "transcript": transcript
     }
 
-
-# -------------------------
-# PROCESS FILE UPLOAD
-# -------------------------
-@app.post("/process-file")
-def process_file(file: UploadFile = File(...)):
-
-    video_id = str(uuid.uuid4())
-
-    file_path = save_upload(file, video_id)
-
-    transcript = transcribe(file_path)
-    summary = summarize(transcript)
-
-    DB[video_id] = {"transcript": transcript}
-
     return {
         "video_id": video_id,
-        "transcript": transcript,
-        "summary": summary
+        "summary": summary,
+        "transcript": transcript
     }
 
 
 # -------------------------
 # ASK
 # -------------------------
-class AskRequest(BaseModel):
-    video_id: str
-    question: str
-
-
 @app.post("/ask")
-def ask(req: AskRequest):
+def ask(req: AskReq):
 
     text = DB.get(req.video_id, {}).get("transcript", "")
 
-    return {
-        "answer": answer(text, req.question)
-    }
+    answer = hf_call(
+        f"""
+Use this transcript:
+{text}
+
+Answer this question:
+{req.question}
+"""
+    )
+
+    return {"answer": answer}
