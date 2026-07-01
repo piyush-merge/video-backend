@@ -1,5 +1,6 @@
 fastapi
 uvicorn
-requests
 yt-dlp
-python-multipart
+openai-whisper
+torch
+numpy
