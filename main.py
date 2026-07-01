@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, UploadFile, File
 from pydantic import BaseModel
 import uuid
 import os
@@ -9,39 +9,25 @@ from faster_whisper import WhisperModel
 
 app = FastAPI()
 
-# ----------------------------
-# LOAD WHISPER MODEL
-# ----------------------------
 model = WhisperModel("base", device="cpu", compute_type="int8")
 
-# ----------------------------
-# REQUEST SCHEMAS
-# ----------------------------
-class ProcessRequest(BaseModel):
-    url: str
-
-class AskRequest(BaseModel):
-    video_id: str
-    question: str
-
-
-# ----------------------------
-# IN-MEMORY STORAGE (simple v1)
-# later replaced with Drive/DB
-# ----------------------------
 DB = {}
 
+# -------------------------
+# REQUEST SCHEMA (URL ONLY)
+# -------------------------
+class URLRequest(BaseModel):
+    url: str
 
-# ----------------------------
-# DOWNLOAD VIDEO AUDIO
-# ----------------------------
-def download_audio(url, video_id):
-    output = f"{video_id}.mp3"
+
+# -------------------------
+# DOWNLOAD FROM URL
+# -------------------------
+def download_from_url(url, video_id):
+    output = f"{video_id}.mp4"
 
     cmd = [
         "yt-dlp",
-        "-x",
-        "--audio-format", "mp3",
         "-o", output,
         url
     ]
@@ -50,80 +36,67 @@ def download_audio(url, video_id):
     return output
 
 
-# ----------------------------
-# TRANSCRIBE AUDIO
-# ----------------------------
-def transcribe_audio(audio_path):
-    segments, info = model.transcribe(audio_path)
+# -------------------------
+# SAVE UPLOADED FILE
+# -------------------------
+def save_upload(file: UploadFile, video_id):
+    path = f"{video_id}.mp4"
+
+    with open(path, "wb") as f:
+        f.write(file.file.read())
+
+    return path
+
+
+# -------------------------
+# TRANSCRIBE
+# -------------------------
+def transcribe(path):
+    segments, _ = model.transcribe(path)
 
     text = ""
-    for segment in segments:
-        text += segment.text + " "
+    for s in segments:
+        text += s.text + " "
 
     return text.strip()
 
 
-# ----------------------------
-# SIMPLE LLM (FREE VIA HF INFERENCE)
-# ----------------------------
+# -------------------------
+# SIMPLE LLM (HF FREE)
+# -------------------------
 HF_API = "https://api-inference.huggingface.co/models/google/flan-t5-large"
 
-def call_llm(prompt):
-    response = requests.post(
-        HF_API,
-        json={"inputs": prompt}
-    )
+def llm(prompt):
+    r = requests.post(HF_API, json={"inputs": prompt})
 
     try:
-        return response.json()[0]["generated_text"]
+        return r.json()[0]["generated_text"]
     except:
-        return "LLM error or rate limit."
+        return "LLM error"
 
 
-# ----------------------------
-# SUMMARIZE TRANSCRIPT
-# ----------------------------
 def summarize(text):
-    prompt = f"""
-Summarize the following transcript in clear bullet points:
-
-{text[:4000]}
-"""
-    return call_llm(prompt)
+    return llm(f"Summarize:\n{text[:4000]}")
 
 
-# ----------------------------
-# ANSWER QUESTIONS (RAG-lite)
-# ----------------------------
-def answer_question(transcript, question):
-    prompt = f"""
-Use the transcript to answer the question.
-
-Transcript:
-{transcript[:4000]}
-
-Question:
-{question}
-"""
-    return call_llm(prompt)
+def answer(text, question):
+    return llm(f"Answer using transcript:\n{text[:4000]}\nQ: {question}")
 
 
-# ----------------------------
-# PROCESS ENDPOINT
-# ----------------------------
+# -------------------------
+# PROCESS URL
+# -------------------------
 @app.post("/process")
-def process(req: ProcessRequest):
+def process_url(req: URLRequest):
 
     video_id = str(uuid.uuid4())
 
-    audio_file = download_audio(req.url, video_id)
-    transcript = transcribe_audio(audio_file)
+    file_path = download_from_url(req.url, video_id)
+
+    transcript = transcribe(file_path)
     summary = summarize(transcript)
 
-    DB[video_id] = {
-        "transcript": transcript,
-        "summary": summary
-    }
+    DB[video_id] = {"transcript": transcript}
 
     return {
         "video_id": video_id,
@@ -132,19 +105,41 @@ def process(req: ProcessRequest):
     }
 
 
-# ----------------------------
-# ASK ENDPOINT
-# ----------------------------
+# -------------------------
+# PROCESS FILE UPLOAD
+# -------------------------
+@app.post("/process-file")
+def process_file(file: UploadFile = File(...)):
+
+    video_id = str(uuid.uuid4())
+
+    file_path = save_upload(file, video_id)
+
+    transcript = transcribe(file_path)
+    summary = summarize(transcript)
+
+    DB[video_id] = {"transcript": transcript}
+
+    return {
+        "video_id": video_id,
+        "transcript": transcript,
+        "summary": summary
+    }
+
+
+# -------------------------
+# ASK
+# -------------------------
+class AskRequest(BaseModel):
+    video_id: str
+    question: str
+
+
 @app.post("/ask")
 def ask(req: AskRequest):
 
-    if req.video_id not in DB:
-        return {"error": "video_id not found"}
-
-    transcript = DB[req.video_id]["transcript"]
-
-    answer = answer_question(transcript, req.question)
+    text = DB.get(req.video_id, {}).get("transcript", "")
 
     return {
-        "answer": answer
+        "answer": answer(text, req.question)
     }
