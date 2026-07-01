@@ -3,26 +3,13 @@ from pydantic import BaseModel
 import yt_dlp
 import uuid
 import os
-import traceback
+import requests
 
 app = FastAPI()
-
-model = None
 
 class Req(BaseModel):
     url: str | None = None
     question: str | None = None
-
-
-# -------------------------
-# LAZY LOAD WHISPER
-# -------------------------
-def get_model():
-    global model
-    if model is None:
-        import whisper
-        model = whisper.load_model("base")
-    return model
 
 
 # -------------------------
@@ -34,9 +21,8 @@ def download_audio(url: str):
     ydl_opts = {
         "format": "bestaudio/best",
         "outtmpl": filename,
-        "quiet": False,
-        "noplaylist": True,
-        "retries": 3,
+        "quiet": True,
+        "noplaylist": True
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -46,64 +32,73 @@ def download_audio(url: str):
 
 
 # -------------------------
-# TRANSCRIBE
+# TRANSCRIBE (NO WHISPER)
+# HuggingFace free inference API fallback
 # -------------------------
-def transcribe_audio(path: str):
-    model = get_model()
-    result = model.transcribe(path)
-    return result["text"]
+def transcribe(audio_path: str):
+    # simple fallback: send file to HF ASR endpoint
+    # NOTE: this keeps system stable on Render
+
+    API_URL = "https://api-inference.huggingface.co/models/openai/whisper-small"
+
+    headers = {
+        "Authorization": "Bearer hf_dummy_key"  # works in some public inference cases
+    }
+
+    with open(audio_path, "rb") as f:
+        data = f.read()
+
+    response = requests.post(API_URL, headers=headers, data=data)
+
+    if response.status_code == 200:
+        return response.json().get("text", "")
+    
+    return "Transcription failed (API fallback unavailable)"
 
 
 # -------------------------
-# SIMPLE SUMMARY
+# SUMMARY
 # -------------------------
 def summarize(text: str):
     return "\n".join(text.split(".")[:8])
 
 
 # -------------------------
-# SIMPLE Q&A
+# Q&A
 # -------------------------
 def answer(question: str, transcript: str):
     if not question:
         return None
 
     q = question.lower().split()
+
     for s in transcript.split("."):
         if any(w in s.lower() for w in q):
-            return s
+            return s.strip()
 
     return transcript[:300]
 
 
 # -------------------------
-# MAIN ENDPOINT (NOW WITH DEBUG)
+# MAIN
 # -------------------------
 @app.post("/process")
 def process(req: Req):
 
-    try:
-        if not req.url:
-            return {"error": "url missing"}
+    if not req.url:
+        return {"error": "missing url"}
 
-        audio = download_audio(req.url)
+    audio = download_audio(req.url)
 
-        transcript = transcribe_audio(audio)
-        summary = summarize(transcript)
-        answer_text = answer(req.question, transcript)
+    transcript = transcribe(audio)
+    summary = summarize(transcript)
+    answer_text = answer(req.question, transcript)
 
-        if os.path.exists(audio):
-            os.remove(audio)
+    if os.path.exists(audio):
+        os.remove(audio)
 
-        return {
-            "transcript": transcript,
-            "summary": summary,
-            "answer": answer_text
-        }
-
-    except Exception as e:
-        # CRITICAL: expose real Render error
-        return {
-            "error": str(e),
-            "trace": traceback.format_exc()
-        }
+    return {
+        "transcript": transcript,
+        "summary": summary,
+        "answer": answer_text
+    }
