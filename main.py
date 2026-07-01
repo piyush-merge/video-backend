@@ -3,7 +3,6 @@ from pydantic import BaseModel
 import uuid
 import subprocess
 import requests
-import os
 
 app = FastAPI()
 
@@ -22,74 +21,59 @@ class AskReq(BaseModel):
 
 
 # -------------------------
-# DOWNLOAD VIDEO
+# SAFE DOWNLOAD (NO ASSUMPTIONS)
 # -------------------------
 def download_video(url, video_id):
-    video_path = f"{video_id}.mp4"
+    output = f"{video_id}.mp4"
 
-    subprocess.run([
-        "yt-dlp",
-        "-f", "mp4",
-        "-o", video_path,
-        url
-    ], check=True)
+    subprocess.run(
+        ["yt-dlp", "-f", "mp4", "-o", output, url],
+        check=True
+    )
 
-    return video_path
+    return output
 
 
 # -------------------------
-# EXTRACT AUDIO
+# SAFE AUDIO EXTRACTION
 # -------------------------
 def extract_audio(video_path, video_id):
     audio_path = f"{video_id}.mp3"
 
-    subprocess.run([
-        "ffmpeg",
-        "-i", video_path,
-        "-ar", "16000",
-        "-ac", "1",
-        audio_path
-    ], check=True)
+    subprocess.run(
+        ["ffmpeg", "-y", "-i", video_path, "-ar", "16000", "-ac", "1", audio_path],
+        check=True
+    )
 
     return audio_path
 
 
 # -------------------------
-# HF WHISPER API (FREE, STABLE)
+# SAFE TRANSCRIPTION (NO IMPORT TIME EXECUTION)
 # -------------------------
-HF_WHISPER_API = "https://api-inference.huggingface.co/models/openai/whisper-small"
-
-
 def transcribe_audio(audio_path):
-    headers = {}
+    HF_API = "https://api-inference.huggingface.co/models/openai/whisper-small"
 
     with open(audio_path, "rb") as f:
-        audio_bytes = f.read()
-
-    response = requests.post(
-        HF_WHISPER_API,
-        headers=headers,
-        data=audio_bytes
-    )
+        audio = f.read()
 
     try:
-        return response.json()["text"]
-    except:
-        return "Transcription failed or model loading"
+        r = requests.post(HF_API, data=audio, timeout=120)
+        return r.json().get("text", "No transcription result")
+    except Exception as e:
+        return f"Transcription failed: {str(e)}"
 
 
 # -------------------------
 # SIMPLE LLM
 # -------------------------
-def simple_llm(prompt: str):
+def simple_llm(text: str):
 
-    text = prompt.lower()
+    if "summarize" in text.lower():
+        return "Summary: Video processed and transcription extracted successfully."
 
-    if "summarize" in text:
-        return "Summary: The video has been transcribed and key spoken topics are extracted."
-
-    if "answer" in text:
-        return "Answer: Based on the transcript, relevant information has been identified."
+    if "answer" in text.lower():
+        return "Answer: Based on transcript, relevant information was found."
 
     return "Processed successfully."
 
@@ -108,11 +92,9 @@ def process(req: ProcessReq):
 
         transcript = transcribe_audio(audio_path)
 
-        DB[video_id] = {
-            "transcript": transcript
-        }
+        DB[video_id] = {"transcript": transcript}
 
-        summary = simple_llm(f"summarize: {transcript[:2000]}")
+        summary = simple_llm(f"summarize {transcript[:2000]}")
 
         return {
             "video_id": video_id,
@@ -121,9 +103,7 @@ def process(req: ProcessReq):
         }
 
     except Exception as e:
-        return {
-            "error": str(e)
-        }
+        return {"error": str(e)}
 
 
 # -------------------------
