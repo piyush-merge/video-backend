@@ -1,131 +1,66 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
 import uuid
-import subprocess
+import yt_dlp
 import requests
 import os
 
-
 app = FastAPI()
-DB = {}
 
-# -------------------------
-# MODELS
-# -------------------------
-class ProcessReq(BaseModel):
+HF_TOKEN = os.getenv("HF_TOKEN")  # optional but recommended
+
+
+class ProcessRequest(BaseModel):
     url: str
 
-class AskReq(BaseModel):
-    video_id: str
-    question: str
 
-
-# -------------------------
-# INIT WHISPER (SAFE ON STARTUP)
-# -------------------------
-model = WhisperModel("base", device="cpu", compute_type="int8")
-
-
-# -------------------------
-# DOWNLOAD VIDEO
-# -------------------------
-def download_video(url, vid):
-    out = f"{vid}.mp4"
-    subprocess.run(
-        ["yt-dlp", "-f", "mp4", "-o", out, url],
-        check=True
-    )
-    return out
-
-
-# -------------------------
-# EXTRACT AUDIO
-# -------------------------
-def extract_audio(video, vid):
-    audio = f"{vid}.mp3"
-    subprocess.run(
-        ["ffmpeg", "-y", "-i", video, "-ar", "16000", "-ac", "1", audio],
-        check=True
-    )
-    return audio
-
-
-# -------------------------
-# TRANSCRIBE
-# -------------------------
-def transcribe(audio):
-    segments, _ = model.transcribe(audio)
-    return " ".join([s.text for s in segments])
-
-
-# -------------------------
-# FREE LLM (HF INFERENCE API)
-# -------------------------
-HF_API = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.2"
-
-HF_TOKEN = os.getenv("HF_TOKEN")
-
-headers = {
-    "Authorization": f"Bearer {HF_TOKEN}"
-}
-
-
-def llm(prompt):
-    payload = {
-        "inputs": prompt
+def download_audio(url: str, file_id: str):
+    ydl_opts = {
+        "format": "bestaudio/best",
+        "outtmpl": f"{file_id}.%(ext)s",
+        "quiet": True,
     }
 
-    r = requests.post(HF_API, headers=headers, json=payload, timeout=120)
-
-    try:
-        return r.json()[0]["generated_text"]
-    except:
-        return str(r.text)
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        filename = ydl.prepare_filename(info)
+    return filename
 
 
-# -------------------------
-# PROCESS PIPELINE
-# -------------------------
+def transcribe_with_hf(audio_path: str):
+    API_URL = "https://api-inference.huggingface.co/models/openai/whisper-small"
+
+    headers = {}
+    if HF_TOKEN:
+        headers["Authorization"] = f"Bearer {HF_TOKEN}"
+
+    with open(audio_path, "rb") as f:
+        data = f.read()
+
+    response = requests.post(API_URL, headers=headers, data=data)
+
+    if response.status_code != 200:
+        return "Transcription failed (HF API error)"
+
+    return response.json().get("text", "No transcript returned")
+
+
+def summarize_text(text: str):
+    # simple fallback summary (no LLM dependency)
+    return "Summary: " + text[:300]
+
+
 @app.post("/process")
-def process(req: ProcessReq):
+def process(req: ProcessRequest):
+    video_id = str(uuid.uuid4())
 
-    vid = str(uuid.uuid4())
+    audio_file = download_audio(req.url, video_id)
 
-    video = download_video(req.url, vid)
-    audio = extract_audio(video, vid)
-    transcript = transcribe(audio)
-
-    summary = llm(f"Summarize this transcript:\n{transcript[:8000]}")
-
-    DB[vid] = {
-        "transcript": transcript
-    }
+    transcript = transcribe_with_hf(audio_file)
+    summary = summarize_text(transcript)
 
     return {
-        "video_id": vid,
-        "summary": summary,
-        "transcript": transcript[:4000]
+        "video_id": video_id,
+        "transcript": transcript,
+        "summary": summary
     }
-
-
-# -------------------------
-# Q&A
-# -------------------------
-@app.post("/ask")
-def ask(req: AskReq):
-
-    transcript = DB.get(req.video_id, {}).get("transcript", "")
-
-    answer = llm(
-        f"""
-Use the transcript to answer the question.
-
-Transcript:
-{transcript[:8000]}
-
-Question:
-{req.question}
-"""
-    )
-
-    return {"answer": answer}
