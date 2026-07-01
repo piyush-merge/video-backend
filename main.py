@@ -5,7 +5,6 @@ import subprocess
 import requests
 import os
 
-from faster_whisper import WhisperModel
 
 app = FastAPI()
 DB = {}
