@@ -1,5 +1,7 @@
 fastapi
 uvicorn
-pydantic
-yt-dlp
 requests
+yt-dlp
+faster-whisper
+ffmpeg-python
+pydantic
