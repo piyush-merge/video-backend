@@ -1,23 +1,27 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
 import yt_dlp
-import whisper
 import uuid
 import os
 
 app = FastAPI()
 
-# -------------------------
-# MODEL LOAD
-# -------------------------
-model = whisper.load_model("base")
+model = None  # lazy load fix
 
-# -------------------------
-# REQUEST SCHEMA
-# -------------------------
 class Req(BaseModel):
     url: str | None = None
     question: str | None = None
+
+
+# -------------------------
+# LOAD WHISPER ONLY WHEN NEEDED
+# -------------------------
+def get_model():
+    global model
+    if model is None:
+        import whisper
+        model = whisper.load_model("base")
+    return model
 
 
 # -------------------------
@@ -41,15 +45,16 @@ def download_audio(url: str):
 
 
 # -------------------------
-# TRANSCRIPTION
+# TRANSCRIBE
 # -------------------------
 def transcribe_audio(path: str):
+    model = get_model()
     result = model.transcribe(path)
     return result["text"]
 
 
 # -------------------------
-# SUMMARY (SAFE FALLBACK)
+# SUMMARY (TEMP LOGIC)
 # -------------------------
 def summarize(text: str):
     sentences = text.split(".")
@@ -57,7 +62,7 @@ def summarize(text: str):
 
 
 # -------------------------
-# SIMPLE Q&A
+# Q&A (SIMPLE MATCH)
 # -------------------------
 def answer(question: str, transcript: str):
     if not question:
@@ -86,7 +91,7 @@ def process(req: Req):
     transcript = transcribe_audio(audio)
 
     summary = summarize(transcript)
-    answer = answer(req.question, transcript)
+    answer_text = answer(req.question, transcript)
 
     if os.path.exists(audio):
         os.remove(audio)
@@ -94,5 +99,5 @@ def process(req: Req):
     return {
         "transcript": transcript,
         "summary": summary,
-        "answer": answer
+        "answer": answer_text
     }
