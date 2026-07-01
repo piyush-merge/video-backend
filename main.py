@@ -3,10 +3,11 @@ from pydantic import BaseModel
 import yt_dlp
 import uuid
 import os
+import traceback
 
 app = FastAPI()
 
-model = None  # lazy load fix
+model = None
 
 class Req(BaseModel):
     url: str | None = None
@@ -14,7 +15,7 @@ class Req(BaseModel):
 
 
 # -------------------------
-# LOAD WHISPER ONLY WHEN NEEDED
+# LAZY LOAD WHISPER
 # -------------------------
 def get_model():
     global model
@@ -33,9 +34,9 @@ def download_audio(url: str):
     ydl_opts = {
         "format": "bestaudio/best",
         "outtmpl": filename,
-        "quiet": True,
+        "quiet": False,
         "noplaylist": True,
-        "retries": 3
+        "retries": 3,
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -54,50 +55,55 @@ def transcribe_audio(path: str):
 
 
 # -------------------------
-# SUMMARY (TEMP LOGIC)
+# SIMPLE SUMMARY
 # -------------------------
 def summarize(text: str):
-    sentences = text.split(".")
-    return "\n".join([s.strip() for s in sentences[:8] if s.strip()])
+    return "\n".join(text.split(".")[:8])
 
 
 # -------------------------
-# Q&A (SIMPLE MATCH)
+# SIMPLE Q&A
 # -------------------------
 def answer(question: str, transcript: str):
     if not question:
         return None
 
-    q_words = question.lower().split()
-    sentences = transcript.split(".")
+    q = question.lower().split()
+    for s in transcript.split("."):
+        if any(w in s.lower() for w in q):
+            return s
 
-    for s in sentences:
-        if any(w in s.lower() for w in q_words):
-            return s.strip()
-
-    return sentences[0][:300] if sentences else ""
+    return transcript[:300]
 
 
 # -------------------------
-# MAIN ENDPOINT
+# MAIN ENDPOINT (NOW WITH DEBUG)
 # -------------------------
 @app.post("/process")
 def process(req: Req):
 
-    if not req.url:
-        return {"error": "url missing"}
+    try:
+        if not req.url:
+            return {"error": "url missing"}
 
-    audio = download_audio(req.url)
-    transcript = transcribe_audio(audio)
+        audio = download_audio(req.url)
 
-    summary = summarize(transcript)
-    answer_text = answer(req.question, transcript)
+        transcript = transcribe_audio(audio)
+        summary = summarize(transcript)
+        answer_text = answer(req.question, transcript)
 
-    if os.path.exists(audio):
-        os.remove(audio)
+        if os.path.exists(audio):
+            os.remove(audio)
 
-    return {
-        "transcript": transcript,
-        "summary": summary,
-        "answer": answer_text
-    }
+        return {
+            "transcript": transcript,
+            "summary": summary,
+            "answer": answer_text
+        }
+
+    except Exception as e:
+        # CRITICAL: expose real Render error
+        return {
+            "error": str(e),
+            "trace": traceback.format_exc()
+        }
