@@ -1,66 +1,98 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
-import uuid
 import yt_dlp
-import requests
+import whisper
+import uuid
 import os
 
 app = FastAPI()
 
-HF_TOKEN = os.getenv("HF_TOKEN")  # optional but recommended
+# -------------------------
+# MODEL LOAD
+# -------------------------
+model = whisper.load_model("base")
+
+# -------------------------
+# REQUEST SCHEMA
+# -------------------------
+class Req(BaseModel):
+    url: str | None = None
+    question: str | None = None
 
 
-class ProcessRequest(BaseModel):
-    url: str
+# -------------------------
+# DOWNLOAD AUDIO
+# -------------------------
+def download_audio(url: str):
+    filename = f"{uuid.uuid4()}.mp3"
 
-
-def download_audio(url: str, file_id: str):
     ydl_opts = {
         "format": "bestaudio/best",
-        "outtmpl": f"{file_id}.%(ext)s",
+        "outtmpl": filename,
         "quiet": True,
+        "noplaylist": True,
+        "retries": 3
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        filename = ydl.prepare_filename(info)
+        ydl.download([url])
+
     return filename
 
 
-def transcribe_with_hf(audio_path: str):
-    API_URL = "https://api-inference.huggingface.co/models/openai/whisper-small"
-
-    headers = {}
-    if HF_TOKEN:
-        headers["Authorization"] = f"Bearer {HF_TOKEN}"
-
-    with open(audio_path, "rb") as f:
-        data = f.read()
-
-    response = requests.post(API_URL, headers=headers, data=data)
-
-    if response.status_code != 200:
-        return "Transcription failed (HF API error)"
-
-    return response.json().get("text", "No transcript returned")
+# -------------------------
+# TRANSCRIPTION
+# -------------------------
+def transcribe_audio(path: str):
+    result = model.transcribe(path)
+    return result["text"]
 
 
-def summarize_text(text: str):
-    # simple fallback summary (no LLM dependency)
-    return "Summary: " + text[:300]
+# -------------------------
+# SUMMARY (SAFE FALLBACK)
+# -------------------------
+def summarize(text: str):
+    sentences = text.split(".")
+    return "\n".join([s.strip() for s in sentences[:8] if s.strip()])
 
 
+# -------------------------
+# SIMPLE Q&A
+# -------------------------
+def answer(question: str, transcript: str):
+    if not question:
+        return None
+
+    q_words = question.lower().split()
+    sentences = transcript.split(".")
+
+    for s in sentences:
+        if any(w in s.lower() for w in q_words):
+            return s.strip()
+
+    return sentences[0][:300] if sentences else ""
+
+
+# -------------------------
+# MAIN ENDPOINT
+# -------------------------
 @app.post("/process")
-def process(req: ProcessRequest):
-    video_id = str(uuid.uuid4())
+def process(req: Req):
 
-    audio_file = download_audio(req.url, video_id)
+    if not req.url:
+        return {"error": "url missing"}
 
-    transcript = transcribe_with_hf(audio_file)
-    summary = summarize_text(transcript)
+    audio = download_audio(req.url)
+    transcript = transcribe_audio(audio)
+
+    summary = summarize(transcript)
+    answer = answer(req.question, transcript)
+
+    if os.path.exists(audio):
+        os.remove(audio)
 
     return {
-        "video_id": video_id,
         "transcript": transcript,
-        "summary": summary
+        "summary": summary,
+        "answer": answer
     }
